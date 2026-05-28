@@ -17,6 +17,10 @@ function ReceiptScreen({ data, onClose, onSaved }) {
   const [payerId, setPayerId] = React.useState(userId);
   const [newName, setNewName] = React.useState('');
   const [busy, setBusy] = React.useState(false);
+  const [groupId, setGroupId] = React.useState(null);
+  const [showNewGroup, setShowNewGroup] = React.useState(false);
+  const [newGroupName, setNewGroupName] = React.useState('');
+  const [newGroupEmoji, setNewGroupEmoji] = React.useState('🍱');
 
   const fileInputRef = React.useRef(null);
 
@@ -82,6 +86,24 @@ function ReceiptScreen({ data, onClose, onSaved }) {
         setSplitSet(s);
       }
       setNewName('');
+    } catch (e) {
+      alert(e.message);
+    }
+  };
+
+  const createGroupInline = async () => {
+    const name = newGroupName.trim();
+    if (!name) return;
+    try {
+      const { group } = await TallyAPI.groups.add({
+        name, emoji: newGroupEmoji,
+        memberIds: [...splitSet],
+      });
+      // Mutate the local wallet so the new group appears in the picker without a refetch
+      wallet.groups = [...(wallet.groups || []), group];
+      setGroupId(group.id);
+      setShowNewGroup(false);
+      setNewGroupName('');
     } catch (e) {
       alert(e.message);
     }
@@ -163,6 +185,7 @@ function ReceiptScreen({ data, onClose, onSaved }) {
           description: desc.slice(0, 180),
           payerId,
           splitWith: g.who,
+          groupId: groupId || undefined,
         });
       }
       onSaved();
@@ -254,6 +277,62 @@ function ReceiptScreen({ data, onClose, onSaved }) {
             </div>
           ) : null}
         </div>
+
+        {/* Group */}
+        <label style={{ fontSize: 11, color: T_r.secondary, letterSpacing: 0.5, textTransform: 'uppercase' }}>Group (optional)</label>
+        <div style={{ display: 'flex', gap: 6, marginTop: 6, marginBottom: 14, overflowX: 'auto', paddingBottom: 4 }} className="no-scroll">
+          <div onClick={() => setGroupId(null)} style={{
+            flexShrink: 0, padding: '6px 12px', borderRadius: 100, cursor: 'pointer',
+            background: !groupId ? T_r.primarySoft : '#f4f5f7',
+            border: `1.5px solid ${!groupId ? T_r.primary : 'transparent'}`,
+            fontSize: 12, fontWeight: 600,
+            color: !groupId ? T_r.primary : T_r.secondary,
+            whiteSpace: 'nowrap',
+          }}>No group</div>
+          {(wallet.groups || []).map(g => {
+            const on = g.id === groupId;
+            return (
+              <div key={g.id} onClick={() => setGroupId(g.id)} style={{
+                flexShrink: 0, padding: '6px 12px', borderRadius: 100, cursor: 'pointer',
+                background: on ? T_r.primarySoft : '#f4f5f7',
+                border: `1.5px solid ${on ? T_r.primary : 'transparent'}`,
+                fontSize: 12, fontWeight: 600,
+                color: on ? T_r.primary : T_r.text,
+                display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap',
+              }}>
+                <span style={{ fontSize: 14 }}>{g.emoji}</span>{g.name}
+              </div>
+            );
+          })}
+          <div onClick={() => setShowNewGroup(v => !v)} style={{
+            flexShrink: 0, padding: '6px 12px', borderRadius: 100, cursor: 'pointer',
+            background: '#fff', border: `1px dashed ${T_r.muted}`,
+            fontSize: 12, fontWeight: 500, color: T_r.secondary,
+            whiteSpace: 'nowrap',
+          }}>{showNewGroup ? '✕ Cancel' : '+ New group'}</div>
+        </div>
+
+        {/* Inline new-group form */}
+        {showNewGroup && (
+          <div style={{
+            background: '#f4f5f7', borderRadius: 12, padding: 12, marginBottom: 14,
+          }}>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+              <input value={newGroupEmoji} onChange={e => setNewGroupEmoji(e.target.value.slice(0, 4))} maxLength={4}
+                     style={{ width: 50, fontSize: 22, textAlign: 'center', border: `1px solid ${T_r.divider}`, borderRadius: 10, outline: 'none', background: '#fff' }} />
+              <input value={newGroupName} onChange={e => setNewGroupName(e.target.value)}
+                     placeholder="Tokyo Trip"
+                     onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); createGroupInline(); } }}
+                     style={{ flex: 1, border: `1px solid ${T_r.divider}`, borderRadius: 10, padding: '8px 10px', fontSize: 14, outline: 'none', background: '#fff' }} />
+            </div>
+            <div style={{ fontSize: 11, color: T_r.secondary, marginBottom: 8 }}>
+              People you mark below will be added to this group automatically.
+            </div>
+            <Button onClick={createGroupInline} disabled={!newGroupName.trim()} style={{ width: '100%', padding: '8px', fontSize: 13 }}>
+              Create group
+            </Button>
+          </div>
+        )}
 
         {/* Who was here */}
         <label style={{ fontSize: 11, color: T_r.secondary, letterSpacing: 0.5, textTransform: 'uppercase' }}>Who was here?</label>

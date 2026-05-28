@@ -61,6 +61,7 @@ function App() {
           onFriends={() => setRoute('friends')}
           onSubs={() => setRoute('subs')}
           onGroups={() => setRoute('groups')}
+          onSettings={() => setRoute('settings')}
           onSelectGroup={setSelectedGroupId}
           selectedGroupId={selectedGroupId}
           onRemoveExpense={onRemoveExpense}
@@ -77,6 +78,9 @@ function App() {
       )}
       {route === 'subs' && (
         <SubsScreen data={data} onBack={() => setRoute('home')} onChanged={refresh} />
+      )}
+      {route === 'settings' && (
+        <SettingsScreen data={data} onBack={() => setRoute('home')} onChanged={refresh} />
       )}
       {/* Persistent bottom nav across the 4 main routes. Hidden on Friends (deep modal-style screen). */}
       {['home', 'groups', 'settle', 'subs'].includes(route) && (

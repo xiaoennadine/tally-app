@@ -1,6 +1,22 @@
 // Subscriptions — track recurring shared services.
 const T_sub = window.TG_TOKENS;
 
+// Given a sub with nextCharge + cycle, compute days-until-renewal and bar progress.
+function computeCycleProgress(s) {
+  if (!s.nextCharge) return null;
+  const next = new Date(s.nextCharge + 'T00:00:00');
+  if (isNaN(next.getTime())) return null;
+  const now = new Date();
+  // Today at midnight for stable day math
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const daysLeft = Math.round((next - today) / 86400000);
+  const cycleDays = (s.cycle === 'yearly') ? 365 : 30;
+  const elapsed = Math.max(0, cycleDays - daysLeft);
+  const progressPct = (elapsed / cycleDays) * 100;
+  const formattedDate = next.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return { daysLeft, progressPct, formattedDate };
+}
+
 function SubsScreen({ data, onBack, onChanged }) {
   const { user, wallet } = data;
   const userId = user.id;
@@ -46,6 +62,7 @@ function SubsScreen({ data, onBack, onChanged }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {wallet.subs.map(s => {
                 const share = s.price / s.members.length;
+                const cycleInfo = computeCycleProgress(s);
                 return (
                   <Card key={s.id}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px' }}>
@@ -53,7 +70,7 @@ function SubsScreen({ data, onBack, onChanged }) {
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 15, fontWeight: 600, color: T_sub.text }}>{s.name}</div>
                         <div style={{ fontSize: 11.5, color: T_sub.secondary }}>
-                          {wallet.members[s.payer]?.name || '?'} pays · ÷ {s.members.length}
+                          {wallet.members[s.payer]?.name || '?'} pays · ÷ {s.members.length} · {s.cycle || 'monthly'}
                         </div>
                       </div>
                       <div style={{ textAlign: 'right' }}>
@@ -61,6 +78,31 @@ function SubsScreen({ data, onBack, onChanged }) {
                         <div style={{ fontSize: 10.5, color: T_sub.muted }}>of {fmtMoney(s.price, s.ccy)}</div>
                       </div>
                     </div>
+
+                    {/* Renewal progress bar */}
+                    {cycleInfo && (
+                      <div style={{ padding: '0 14px 12px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: 11, color: T_sub.secondary, marginBottom: 4 }}>
+                          <span>Renews {cycleInfo.formattedDate}</span>
+                          <span style={{
+                            fontWeight: 600,
+                            color: cycleInfo.daysLeft <= 3 ? T_sub.negative : cycleInfo.daysLeft <= 7 ? '#d97706' : T_sub.secondary,
+                          }}>
+                            {cycleInfo.daysLeft <= 0 ? 'due today' :
+                             cycleInfo.daysLeft === 1 ? 'tomorrow' :
+                             `${cycleInfo.daysLeft} day${cycleInfo.daysLeft === 1 ? '' : 's'}`}
+                          </span>
+                        </div>
+                        <div style={{ height: 4, background: '#eceef0', borderRadius: 100, overflow: 'hidden' }}>
+                          <div style={{
+                            height: '100%', width: `${Math.min(100, cycleInfo.progressPct)}%`,
+                            background: cycleInfo.daysLeft <= 3 ? T_sub.negative : cycleInfo.daysLeft <= 7 ? '#f59e0b' : T_sub.primary,
+                            transition: 'width 300ms ease',
+                          }} />
+                        </div>
+                      </div>
+                    )}
+
                     <div style={{ display: 'flex', borderTop: `1px solid ${T_sub.divider}` }}>
                       <div onClick={() => remove(s.id, s.name)} style={{ flex: 1, padding: '10px', textAlign: 'center', fontSize: 13, color: T_sub.negative, cursor: 'pointer' }}>Remove</div>
                     </div>
@@ -92,6 +134,13 @@ function AddSubSheet({ allMembers, userId, wallet, onClose, onSaved }) {
   const [emoji, setEmoji] = React.useState('📺');
   const [price, setPrice] = React.useState('');
   const [ccy, setCcy] = React.useState(wallet.defaultCcy || 'USD');
+  const [cycle, setCycle] = React.useState('monthly');
+  const [nextCharge, setNextCharge] = React.useState(() => {
+    // Default: 1 month from today, formatted YYYY-MM-DD for <input type=date>
+    const d = new Date();
+    d.setMonth(d.getMonth() + 1);
+    return d.toISOString().slice(0, 10);
+  });
   const [members, setMembers] = React.useState(new Set([userId]));
   const [payer, setPayer] = React.useState(userId);
   const [busy, setBusy] = React.useState(false);
@@ -109,6 +158,8 @@ function AddSubSheet({ allMembers, userId, wallet, onClose, onSaved }) {
       await TallyAPI.subs.add({
         name: name.trim(), emoji,
         price: parseFloat(price), ccy,
+        cycle,
+        nextCharge,
         members: [...members], payer,
       });
       onSaved();
@@ -136,6 +187,37 @@ function AddSubSheet({ allMembers, userId, wallet, onClose, onSaved }) {
           }}>
             {window.SUPPORTED_CCYS.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
+        </div>
+
+        {/* Billing cycle + next charge */}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+          <div style={{ flex: 1 }}>
+            <label style={{ fontSize: 11, color: T_sub.secondary, letterSpacing: 0.5, textTransform: 'uppercase' }}>Cycle</label>
+            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+              {['monthly', 'yearly'].map(c => (
+                <div key={c} onClick={() => setCycle(c)} style={{
+                  flex: 1, padding: '8px 0', borderRadius: 10, textAlign: 'center',
+                  background: cycle === c ? T_sub.primarySoft : '#f4f5f7',
+                  border: `1.5px solid ${cycle === c ? T_sub.primary : 'transparent'}`,
+                  fontSize: 13, fontWeight: 600, color: cycle === c ? T_sub.primary : T_sub.secondary,
+                  cursor: 'pointer', textTransform: 'capitalize',
+                }}>{c}</div>
+              ))}
+            </div>
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={{ fontSize: 11, color: T_sub.secondary, letterSpacing: 0.5, textTransform: 'uppercase' }}>Next charge</label>
+            <input
+              type="date" value={nextCharge}
+              onChange={e => setNextCharge(e.target.value)}
+              min={new Date().toISOString().slice(0, 10)}
+              style={{
+                marginTop: 6, width: '100%', border: `1px solid ${T_sub.divider}`,
+                borderRadius: 10, padding: '8px 10px', fontSize: 13,
+                color: T_sub.text, outline: 'none', fontFamily: 'inherit',
+              }}
+            />
+          </div>
         </div>
 
         <label style={{ fontSize: 11, color: T_sub.secondary, letterSpacing: 0.5, textTransform: 'uppercase' }}>Who pays?</label>

@@ -16,7 +16,7 @@ function relativeTime(iso) {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-function HomeScreen({ data, onAdd, onScanReceipt, onSettle, onFriends, onSubs, onGroups, onSelectGroup, selectedGroupId, onRemoveExpense }) {
+function HomeScreen({ data, onAdd, onScanReceipt, onSettle, onFriends, onSubs, onGroups, onSettings, onSelectGroup, selectedGroupId, onRemoveExpense }) {
   const { user, wallet, summary } = data;
   const userId = user.id;
   const friends = Object.values(wallet.members).filter(m => m.ghost);
@@ -25,21 +25,43 @@ function HomeScreen({ data, onAdd, onScanReceipt, onSettle, onFriends, onSubs, o
     ? wallet.expenses.filter(e => e.groupId === selectedGroupId)
     : wallet.expenses;
   const selectedGroup = groups.find(g => g.id === selectedGroupId);
+  const homeCcy = wallet.defaultCcy || 'USD';
+  const { rates, ready: fxReady } = window.useFx();
 
   // Compute net balance per ccy from summary.balances[userId]
   const netByCcy = {};
   for (const ccy of Object.keys(summary)) {
     netByCcy[ccy] = summary[ccy].balances[userId] || 0;
   }
-  const ccys = Object.keys(netByCcy).length ? Object.keys(netByCcy) : [wallet.defaultCcy];
-  const primaryCcy = ccys[0];
+  const ccys = Object.keys(netByCcy).length ? Object.keys(netByCcy) : [homeCcy];
 
-  // Owed-to-you / you-owe (USD primary)
+  // Hero displays the user's HOME currency, summing converted balances.
+  // If FX isn't ready yet, fall back to showing the home-ccy bucket alone.
+  let netInHome = 0;
+  let allConverted = true;
+  for (const ccy of ccys) {
+    if (ccy === homeCcy) {
+      netInHome += netByCcy[ccy];
+    } else if (fxReady) {
+      const conv = window.convertMoney(netByCcy[ccy], ccy, homeCcy, rates);
+      if (conv === null) allConverted = false;
+      else netInHome += conv;
+    } else {
+      allConverted = false;
+    }
+  }
+  // List of non-home currencies that still have a non-zero balance — shown as a small caption.
+  const foreignCcys = ccys.filter(c => c !== homeCcy && Math.abs(netByCcy[c]) > 0.005);
+
+  // Owed-to-you / you-owe across all ccys, converted to home.
   let owedToYou = 0, youOwe = 0;
-  if (summary[primaryCcy]) {
-    for (const tx of summary[primaryCcy].transactions) {
-      if (tx.to   === userId) owedToYou += tx.amount;
-      if (tx.from === userId) youOwe    += tx.amount;
+  for (const ccy of Object.keys(summary)) {
+    for (const tx of summary[ccy].transactions) {
+      const inHome = (ccy === homeCcy)
+        ? tx.amount
+        : (fxReady ? (window.convertMoney(tx.amount, ccy, homeCcy, rates) || 0) : 0);
+      if (tx.to   === userId) owedToYou += inHome;
+      if (tx.from === userId) youOwe    += inHome;
     }
   }
 
@@ -49,12 +71,20 @@ function HomeScreen({ data, onAdd, onScanReceipt, onSettle, onFriends, onSubs, o
         title={`Hi, ${user.name.split(' ')[0]} 👋`}
         subtitle={friends.length ? `${friends.length} friend${friends.length>1?'s':''} · ${wallet.expenses.length} expenses` : 'Welcome to Tally'}
         trailing={
-          <div onClick={onFriends} style={{ padding: 6, cursor: 'pointer' }}>
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-              <circle cx="9"  cy="9" r="3.2" stroke={T_home.text} strokeWidth="1.8"/>
-              <circle cx="16" cy="10" r="2.4" stroke={T_home.text} strokeWidth="1.8"/>
-              <path d="M3 19c0-3 2.7-5 6-5s6 2 6 5M16 14c2.5 0 5 1.5 5 4" stroke={T_home.text} strokeWidth="1.8" strokeLinecap="round" fill="none"/>
-            </svg>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <div onClick={onFriends} style={{ padding: 6, cursor: 'pointer' }} title="Friends">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                <circle cx="9"  cy="9" r="3.2" stroke={T_home.text} strokeWidth="1.8"/>
+                <circle cx="16" cy="10" r="2.4" stroke={T_home.text} strokeWidth="1.8"/>
+                <path d="M3 19c0-3 2.7-5 6-5s6 2 6 5M16 14c2.5 0 5 1.5 5 4" stroke={T_home.text} strokeWidth="1.8" strokeLinecap="round" fill="none"/>
+              </svg>
+            </div>
+            <div onClick={onSettings} style={{ padding: 6, cursor: 'pointer' }} title="Settings">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="3" stroke={T_home.text} strokeWidth="1.8"/>
+                <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" stroke={T_home.text} strokeWidth="1.6" fill="none" strokeLinejoin="round"/>
+              </svg>
+            </div>
           </div>
         }
       />
@@ -68,35 +98,52 @@ function HomeScreen({ data, onAdd, onScanReceipt, onSettle, onFriends, onSubs, o
             boxShadow: '0 10px 30px rgba(124,92,255,0.3)',
           }}>
             <div style={{ position: 'absolute', right: -30, top: -30, width: 140, height: 140, borderRadius: '50%', background: 'rgba(255,255,255,0.08)' }} />
-            <div style={{ fontSize: 12, opacity: 0.85, letterSpacing: 0.8, textTransform: 'uppercase', position: 'relative' }}>Net balance ({primaryCcy})</div>
+            <div style={{ fontSize: 12, opacity: 0.85, letterSpacing: 0.8, textTransform: 'uppercase', position: 'relative' }}>
+              Net balance ({homeCcy}){!allConverted && fxReady && <span style={{ marginLeft: 6, fontSize: 10, opacity: 0.7 }}>· est.</span>}
+            </div>
             <div style={{ fontSize: 36, fontWeight: 700, letterSpacing: -1, marginTop: 4, position: 'relative' }}>
-              {netByCcy[primaryCcy] >= 0 ? '+' : '−'}{fmtMoney(Math.abs(netByCcy[primaryCcy] || 0), primaryCcy)}
+              {netInHome >= 0 ? '+' : '−'}{fmtMoney(Math.abs(netInHome), homeCcy)}
             </div>
             <div style={{ display: 'flex', gap: 16, marginTop: 12, position: 'relative' }}>
               <div>
                 <div style={{ fontSize: 10.5, opacity: 0.8, letterSpacing: 0.5 }}>OWED TO YOU</div>
-                <div style={{ fontSize: 16, fontWeight: 600 }}>{fmtMoney(owedToYou, primaryCcy)}</div>
+                <div style={{ fontSize: 16, fontWeight: 600 }}>{fmtMoney(owedToYou, homeCcy)}</div>
               </div>
               <div style={{ width: 1, background: 'rgba(255,255,255,0.3)' }} />
               <div>
                 <div style={{ fontSize: 10.5, opacity: 0.8, letterSpacing: 0.5 }}>YOU OWE</div>
-                <div style={{ fontSize: 16, fontWeight: 600 }}>{fmtMoney(youOwe, primaryCcy)}</div>
+                <div style={{ fontSize: 16, fontWeight: 600 }}>{fmtMoney(youOwe, homeCcy)}</div>
               </div>
             </div>
-            {ccys.length > 1 && (
+            {foreignCcys.length > 0 && (
               <div style={{ marginTop: 10, position: 'relative', fontSize: 11, opacity: 0.9 }}>
-                + {ccys.slice(1).map(c => `${fmtMoney(netByCcy[c], c)}`).join(' · ')}
+                {foreignCcys.map(c => `${netByCcy[c] >= 0 ? '+' : '−'}${fmtMoney(Math.abs(netByCcy[c]), c)}`).join(' · ')}
+                <span style={{ marginLeft: 6, opacity: 0.65 }}>(original)</span>
               </div>
             )}
           </div>
         </div>
 
-        {/* Quick actions */}
-        <div style={{ padding: '0 14px 14px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <ActionTile icon="📸" label="Scan receipt" sub="AI itemize" onClick={onScanReceipt} accent="#1fbf75" />
-          <ActionTile icon="↔" label="Settle up" onClick={onSettle} accent={T_home.primary} />
-          <ActionTile icon="👥" label="Friends" sub={friends.length + ' added'} onClick={onFriends} accent="#2AABEE" />
-          <ActionTile icon="📺" label="Subs" sub={wallet.subs.length ? `${wallet.subs.length} active` : 'none'} onClick={onSubs} accent="#ff7ab3" />
+        {/* Scan receipt — primary CTA. Other destinations are in the bottom nav. */}
+        <div style={{ padding: '0 14px 14px' }}>
+          <div onClick={onScanReceipt} style={{
+            background: '#fff', borderRadius: 14, padding: '14px 16px',
+            border: `1px solid ${T_home.divider}`, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', gap: 12,
+          }}>
+            <div style={{
+              width: 44, height: 44, borderRadius: 12,
+              background: '#1fbf7522', color: '#1fbf75',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0,
+            }}>📸</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: T_home.text }}>Scan a receipt</div>
+              <div style={{ fontSize: 12, color: T_home.secondary, marginTop: 1 }}>Snap a photo · AI splits it line by line</div>
+            </div>
+            <svg width="18" height="18" viewBox="0 0 20 20" style={{ flexShrink: 0, color: T_home.muted }}>
+              <path d="M7 4l6 6-6 6" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </div>
         </div>
 
         {/* Groups */}
@@ -155,6 +202,10 @@ function HomeScreen({ data, onAdd, onScanReceipt, onSettle, onFriends, onSubs, o
                 const share = e.splitWith.includes(userId) ? e.amount / e.splitWith.length : 0;
                 const yourImpact = isYou ? (e.amount - share) : -share;
                 const group = e.groupId ? groups.find(g => g.id === e.groupId) : null;
+                const isForeign = e.ccy !== homeCcy;
+                const impactInHome = isForeign && fxReady
+                  ? window.convertMoney(yourImpact, e.ccy, homeCcy, rates)
+                  : null;
                 return (
                   <Row key={e.id} last={i === visibleExpenses.length - 1}>
                     <Avatar name={payer?.name || '?'} size={38} />
@@ -170,6 +221,11 @@ function HomeScreen({ data, onAdd, onScanReceipt, onSettle, onFriends, onSubs, o
                       <div style={{ fontSize: 14, fontWeight: 700, color: yourImpact >= 0 ? T_home.positive : T_home.negative, fontVariantNumeric: 'tabular-nums' }}>
                         {yourImpact >= 0 ? '+' : '−'}{fmtMoney(Math.abs(yourImpact), e.ccy)}
                       </div>
+                      {impactInHome !== null && (
+                        <div style={{ fontSize: 10.5, color: T_home.muted, marginTop: 1, fontVariantNumeric: 'tabular-nums' }}>
+                          ≈ {fmtMoney(Math.abs(impactInHome), homeCcy)}
+                        </div>
+                      )}
                       <div onClick={(ev) => {
                         ev.stopPropagation();
                         if (window.confirm(`Delete "${e.desc}"?`)) onRemoveExpense(e.id);

@@ -60,9 +60,38 @@ window.TallyAPI = {
   },
   groups: {
     add:    (body)           => api('/api/groups',     { method: 'POST',   body }),
+    update: (id, body)       => api(`/api/groups?id=${encodeURIComponent(id)}`, { method: 'PATCH', body }),
     remove: (id)             => api(`/api/groups?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
   },
   settings: (body)           => api('/api/settings',   { method: 'POST',   body }),
+  fx:       ()               => api('/api/fx'),
+};
+
+// ─── FX helpers ───────────────────────────────────────────────────────
+// Convert an amount between any two supported currencies using a rates
+// table {USD: 1, EUR: 0.92, JPY: 156, ...} (base = USD).
+window.convertMoney = function(amount, from, to, rates) {
+  if (!rates || !rates[from] || !rates[to]) return null;
+  if (from === to) return amount;
+  // amount in USD = amount / rates[from]; then * rates[to]
+  return (amount / rates[from]) * rates[to];
+};
+
+// React hook: loads FX rates once on mount, caches in module scope so
+// switching screens doesn't re-fetch. Returns { rates, ready, error }.
+let _fxCache = null;
+let _fxPromise = null;
+window.useFx = function() {
+  const [state, setState] = React.useState(() => _fxCache
+    ? { rates: _fxCache.rates, ready: true, error: null }
+    : { rates: null, ready: false, error: null });
+  React.useEffect(() => {
+    if (_fxCache) return;
+    if (!_fxPromise) _fxPromise = window.TallyAPI.fx().then(r => { _fxCache = r; return r; });
+    _fxPromise.then(r => setState({ rates: r.rates, ready: true, error: null }))
+              .catch(e => setState({ rates: null, ready: false, error: e.message }));
+  }, []);
+  return state;
 };
 
 // Helpers
