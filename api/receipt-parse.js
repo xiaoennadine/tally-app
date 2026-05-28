@@ -68,34 +68,16 @@ module.exports = async (req, res) => {
   const mimeType = `image/${mimeSub === 'jpg' ? 'jpeg' : mimeSub}`;
 
   try {
-    const r = await fetch(`${ENDPOINT}?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          role: 'user',
-          parts: [
-            { inline_data: { mime_type: mimeType, data: b64 } },
-            { text: SCHEMA_PROMPT },
-          ],
-        }],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA,
-          temperature: 0.1,
-          // Keep it tight — receipts are short. Bump if you see truncations on huge bills.
-          maxOutputTokens: 2048,
-        },
-      }),
+    const { data: json, status } = await callGeminiWithRetry({
+      mimeType,
+      b64,
+      apiKey: process.env.GEMINI_API_KEY,
     });
 
-    if (!r.ok) {
-      const txt = await r.text();
-      console.error('gemini error', r.status, txt);
-      return res.status(502).json({ error: `OCR failed (${r.status})` });
+    if (!json) {
+      return res.status(502).json({ error: `OCR failed (${status}) — Gemini is overloaded, try again in a few seconds.` });
     }
 
-    const json = await r.json();
     const text = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
     if (!text) {
       console.error('gemini empty response', JSON.stringify(json).slice(0, 500));
@@ -117,6 +99,47 @@ module.exports = async (req, res) => {
     return res.status(500).json({ error: e.message });
   }
 };
+
+// Gemini's free tier returns 503 "model overloaded" semi-frequently.
+// Retry up to 3 times with exponential backoff (1s, 2s, 4s).
+async function callGeminiWithRetry({ mimeType, b64, apiKey }) {
+  const body = JSON.stringify({
+    contents: [{
+      role: 'user',
+      parts: [
+        { inline_data: { mime_type: mimeType, data: b64 } },
+        { text: SCHEMA_PROMPT },
+      ],
+    }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: RESPONSE_SCHEMA,
+      temperature: 0.1,
+      maxOutputTokens: 2048,
+    },
+  });
+
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+    const r = await fetch(`${ENDPOINT}?key=${encodeURIComponent(apiKey)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+    if (r.ok) {
+      return { data: await r.json(), status: 200 };
+    }
+    lastStatus = r.status;
+    const txt = await r.text();
+    console.error(`gemini attempt ${attempt + 1} failed`, r.status, txt.slice(0, 300));
+    // Only retry on overload/rate-limit/transient errors.
+    if (r.status !== 503 && r.status !== 429 && r.status < 500) {
+      return { data: null, status: r.status };
+    }
+  }
+  return { data: null, status: lastStatus };
+}
 
 async function readBody(req) {
   if (req.body) return typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
