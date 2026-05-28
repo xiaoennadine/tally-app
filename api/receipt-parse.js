@@ -1,60 +1,42 @@
 // POST /api/receipt-parse
 // Body: { imageBase64: "data:image/jpeg;base64,..." }
-// Uses Google Gemini (vision) to OCR a receipt and return structured line items.
-// Requires GEMINI_API_KEY env var.
-//
-// Get a key (free tier is generous): https://aistudio.google.com/apikey
+// Uses Anthropic Claude (vision) to OCR a receipt and return structured line items.
+// Requires ANTHROPIC_API_KEY env var.
 
 const { requireUser } = require('./_lib/auth');
 
-const MODEL = 'gemini-2.0-flash';
-const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+const MODEL = 'claude-haiku-4-5';
 
-const SCHEMA_PROMPT = `
-You are a receipt parser. Look at this receipt image and extract its line items.
+const SCHEMA_INSTRUCTIONS = `
+You are a receipt parser. Look at this receipt image and return ONLY a JSON object — no markdown, no commentary — with this exact shape:
+
+{
+  "vendor": "string (the restaurant/store name, or null)",
+  "currency": "USD" | "EUR" | "GBP" | "JPY" | "SGD" | "AUD" | "CAD",
+  "items": [
+    { "name": "string (item name as printed)", "qty": number (default 1), "price": number (unit price, not line total) }
+  ],
+  "subtotal": number | null,
+  "tax": number | null,
+  "service": number | null,
+  "total": number
+}
 
 Rules:
 - Detect the currency from the symbol or context (¥ → JPY, $ → USD, € → EUR, £ → GBP, S$ → SGD, A$ → AUD, C$ → CAD).
-- "price" is the UNIT price (line_total / qty). If a line shows quantity 2 for $20, return qty: 2, price: 10.
-- Skip non-item lines (subtotal, tax, change, payment method, tips you can't attribute) — capture totals in their own fields.
-- "vendor" is the restaurant/store name printed on the receipt, or null if not visible.
-- If the image is not a receipt or you genuinely cannot read anything, set "error" to a short reason and leave other fields empty/zero.
+- "price" is the unit price (line_total / qty). If a line shows quantity 2 for $20, return qty: 2, price: 10.
+- Skip non-item lines (subtotal, tax, change, payment method) — capture those in their own fields.
+- If you can't read the receipt at all, return { "error": "could not parse" }.
+- Output JSON only. No \`\`\` fences. No prose.
 `.trim();
-
-// Gemini structured-output schema (subset of OpenAPI). Enforces shape so we don't get prose back.
-const RESPONSE_SCHEMA = {
-  type: 'object',
-  properties: {
-    vendor: { type: 'string', nullable: true },
-    currency: { type: 'string', enum: ['USD', 'EUR', 'GBP', 'JPY', 'SGD', 'AUD', 'CAD'] },
-    items: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          name: { type: 'string' },
-          qty: { type: 'number' },
-          price: { type: 'number' },
-        },
-        required: ['name', 'qty', 'price'],
-      },
-    },
-    subtotal: { type: 'number', nullable: true },
-    tax: { type: 'number', nullable: true },
-    service: { type: 'number', nullable: true },
-    total: { type: 'number' },
-    error: { type: 'string', nullable: true },
-  },
-  required: ['currency', 'items', 'total'],
-};
 
 module.exports = async (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
   if (req.method !== 'POST') return res.status(405).end();
 
-  if (!process.env.GEMINI_API_KEY) {
-    return res.status(503).json({ error: 'Receipt OCR is not configured (missing GEMINI_API_KEY).' });
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(503).json({ error: 'Receipt OCR is not configured (missing ANTHROPIC_API_KEY).' });
   }
 
   const body = await readBody(req);
@@ -65,33 +47,27 @@ module.exports = async (req, res) => {
   const m = imageBase64.match(/^data:image\/(\w+);base64,(.+)$/);
   if (!m) return res.status(400).json({ error: 'invalid image format' });
   const [, mimeSub, b64] = m;
-  const mimeType = `image/${mimeSub === 'jpg' ? 'jpeg' : mimeSub}`;
+  const mediaType = `image/${mimeSub === 'jpg' ? 'jpeg' : mimeSub}`;
 
   try {
-    const { data: json, status } = await callGeminiWithRetry({
-      mimeType,
-      b64,
-      apiKey: process.env.GEMINI_API_KEY,
+    const { data: json, status } = await callClaudeWithRetry({
+      mediaType, b64, apiKey: process.env.ANTHROPIC_API_KEY,
     });
 
     if (!json) {
-      return res.status(502).json({ error: `OCR failed (${status}) — Gemini is overloaded, try again in a few seconds.` });
+      return res.status(502).json({ error: `OCR failed (${status}) — try again in a few seconds.` });
     }
 
-    const text = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    if (!text) {
-      console.error('gemini empty response', JSON.stringify(json).slice(0, 500));
-      return res.status(502).json({ error: 'OCR returned empty response' });
-    }
-
+    const text = (json.content?.[0]?.text || '').trim();
     let parsed;
     try {
-      parsed = JSON.parse(text);
+      // Be lenient: strip any accidental ``` fences
+      const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+      parsed = JSON.parse(cleaned);
     } catch (e) {
       console.error('parse error', text.slice(0, 500));
       return res.status(502).json({ error: 'OCR returned non-JSON', raw: text });
     }
-
     if (parsed.error) return res.status(422).json(parsed);
     return res.status(200).json(parsed);
   } catch (e) {
@@ -100,41 +76,39 @@ module.exports = async (req, res) => {
   }
 };
 
-// Gemini's free tier returns 503 "model overloaded" semi-frequently.
-// Retry up to 3 times with exponential backoff (1s, 2s, 4s).
-async function callGeminiWithRetry({ mimeType, b64, apiKey }) {
+// Retry on transient overload/rate-limit errors (529 overloaded, 429 rate-limit, other 5xx).
+async function callClaudeWithRetry({ mediaType, b64, apiKey }) {
   const body = JSON.stringify({
-    contents: [{
+    model: MODEL,
+    max_tokens: 2048,
+    messages: [{
       role: 'user',
-      parts: [
-        { inline_data: { mime_type: mimeType, data: b64 } },
-        { text: SCHEMA_PROMPT },
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
+        { type: 'text', text: SCHEMA_INSTRUCTIONS },
       ],
     }],
-    generationConfig: {
-      responseMimeType: 'application/json',
-      responseSchema: RESPONSE_SCHEMA,
-      temperature: 0.1,
-      maxOutputTokens: 2048,
-    },
   });
 
   let lastStatus = 0;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
-    const r = await fetch(`${ENDPOINT}?key=${encodeURIComponent(apiKey)}`, {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
       body,
     });
-    if (r.ok) {
-      return { data: await r.json(), status: 200 };
-    }
+    if (r.ok) return { data: await r.json(), status: 200 };
+
     lastStatus = r.status;
     const txt = await r.text();
-    console.error(`gemini attempt ${attempt + 1} failed`, r.status, txt.slice(0, 300));
-    // Only retry on overload/rate-limit/transient errors.
-    if (r.status !== 503 && r.status !== 429 && r.status < 500) {
+    console.error(`claude attempt ${attempt + 1} failed`, r.status, txt.slice(0, 300));
+    // Only retry on overload/rate-limit/transient errors. 4xx (other than 429) won't get better.
+    if (r.status !== 529 && r.status !== 429 && r.status < 500) {
       return { data: null, status: r.status };
     }
   }
