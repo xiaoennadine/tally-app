@@ -91,9 +91,20 @@ Open `http://localhost:3000/?devUser=Nadine` — bypasses Telegram auth in dev. 
 
 ---
 
+## Receipt OCR (Gemini)
+
+The **Scan receipt** flow uses Google Gemini 2.5 Flash. To enable it:
+
+1. Get a free API key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Free tier covers ~hundreds of receipts/day.
+2. Vercel project → **Settings → Environment Variables** → add **`GEMINI_API_KEY`** = your key. Apply to all environments. Save.
+3. **Deployments** tab → redeploy so the env var loads.
+
+Without the key, the endpoint returns a friendly 503 and the rest of the app keeps working.
+
+The endpoint (`/api/receipt-parse`) takes a base64 data URL and returns `{ vendor, currency, items, subtotal, tax, service, total }` using Gemini's structured-output mode, so we don't have to parse loose JSON out of prose.
+
 ## What's still missing
 
-- **Receipt OCR** — designed but not implemented. Adding it = call Claude vision in a new `/api/receipt-parse.js` endpoint, return parsed line items. Hold ~2 hrs of work.
 - **Multi-currency conversion** — currencies are tracked separately. No live FX conversion yet (would just need a call to exchangerate-api on the home screen).
 - **Group concept** — currently every expense lives in one flat ledger. To split groups (Roommates / Trip / Subs) we'd add a `groupId` to each expense.
 
